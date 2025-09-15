@@ -1,0 +1,2134 @@
+コンテンツへとスキップする
+チャット履歴
+
+あなた:
+Nuxt3、Vuetifyで業務用アプリを作成しています。
+フォームの各フィールドを、propsやpiniaやapiのレスポンスによって、「表示するかどうか」と「編集可能かどうか」を管理する必要があります。各フィールドがどの状態になればいいのかはエクセルの表でマトリクスで管理しています。これをスマートに管理していきたいので、データの管理方法の実装を手伝ってほしいです。
+ChatGPT:
+なるほど！業務アプリだと「ユーザー権限」「状態」「画面モード（新規/編集/閲覧）」などによって
+各フィールドの表示可否（visible） と 編集可否（editable） を制御することが多いですね。
+
+エクセルでマトリクス管理しているなら、それを設定データとしてアプリに取り込んで一元管理するのがおすすめです。
+以下のようなアプローチを提案します。
+
+🎯 実現イメージ
+各フィールドに 状態制御ルール を定義（マトリクスをコード化）
+
+ルールは JSON または TypeScript オブジェクト で持つ
+
+各コンポーネントでは「そのフィールド名」をキーにして
+「visible」「editable」を動的に参照
+
+表示・編集可否を v-if や :disabled に渡す
+
+1. ルール定義（エクセルをコード化）
+エクセルで管理している表を JSON/TS に落とすイメージです。
+
+// fieldRules.ts
+export type FieldRule = {
+  visible: boolean;
+  editable: boolean;
+};
+
+export type FormState = "create" | "edit" | "view";
+
+export const fieldRules: Record<FormState, Record<string, FieldRule>> = {
+  create: {
+    name: { visible: true, editable: true },
+    email: { visible: true, editable: true },
+    status: { visible: false, editable: false },
+  },
+  edit: {
+    name: { visible: true, editable: false },
+    email: { visible: true, editable: true },
+    status: { visible: true, editable: true },
+  },
+  view: {
+    name: { visible: true, editable: false },
+    email: { visible: true, editable: false },
+    status: { visible: true, editable: false },
+  },
+};
+2. composable で管理
+// useFieldControl.ts
+import { computed } from "vue";
+import { fieldRules, FormState } from "@/config/fieldRules";
+
+export function useFieldControl(formState: FormState) {
+  const getFieldRule = (field: string) =>
+    fieldRules[formState][field] ?? { visible: false, editable: false };
+
+  return {
+    getFieldRule,
+    isVisible: (field: string) => computed(() => getFieldRule(field).visible),
+    isEditable: (field: string) => computed(() => getFieldRule(field).editable),
+  };
+}
+3. コンポーネントで利用
+<script setup lang="ts">
+import { useFieldControl } from "@/composables/useFieldControl";
+
+const formState = "edit"; // props や pinia から注入される
+const { isVisible, isEditable } = useFieldControl(formState);
+
+const form = reactive({
+  name: "",
+  email: "",
+  status: "",
+});
+</script>
+
+<template>
+  <v-form>
+    <v-text-field
+      v-if="isVisible('name')"
+      v-model="form.name"
+      :disabled="!isEditable('name')"
+      label="Name"
+    />
+    <v-text-field
+      v-if="isVisible('email')"
+      v-model="form.email"
+      :disabled="!isEditable('email')"
+      label="Email"
+    />
+    <v-select
+      v-if="isVisible('status')"
+      v-model="form.status"
+      :disabled="!isEditable('status')"
+      :items="['active', 'inactive']"
+      label="Status"
+    />
+  </v-form>
+</template>
+4. 発展系
+エクセル管理を維持したい
+→ JSON 形式でエクスポートして、そのまま読み込めるようにする
+
+Pinia 連携
+→ フォーム状態（create/edit/view）を store に入れてグローバル制御
+
+複雑条件対応
+
+APIレスポンスやユーザー権限による条件分岐を
+computed でルールに組み込む
+
+例:
+
+const getFieldRule = (field: string, userRole: string) => {
+  const base = fieldRules[formState][field] ?? { visible: false, editable: false };
+  if (userRole === "admin") {
+    return { ...base, editable: true }; // 管理者は常に編集可
+  }
+  return base;
+};
+✅ この方法だと
+
+フォームUIから制御ロジックを分離できる
+
+Excelのルールをそのまま 設定ファイル化できる
+
+状態追加（新しい画面モード・権限など）も設定だけで対応可能
+
+ご質問ですが、
+今管理されているエクセルのマトリクスって、
+
+「画面モード × フィールド」だけなのか
+
+それとも「ユーザー権限 × APIレスポンス × フィールド」のように複雑条件も含まれているのか
+
+どちらでしょう？
+それによって実装の粒度（設定ファイル方式 or ロジック方式）が変わってきます。
+
+あなた:
+少しずつ整理していきたいので、手伝ってください。
+まず、フォームのフィールドはenumで定義する方向です。例えば、以下のような感じです。
+export enum DecisionField {
+  DocType,
+  DocName,
+  DocSubject,
+  CreatedAt,
+  PrimaryFlg,
+}
+本当はもっとフィールドの数はあるのですが、とりあえずこれをたたき台にしたいです。
+ChatGPT:
+いいですね！enum でフィールドを定義しておくと、
+
+型安全に管理できる
+
+フィールド名のtypoを防げる
+
+ルール定義やフォーム生成に流用しやすい
+
+といったメリットがあります 👍
+
+まずは enum をベースにルール管理する仕組み を最小限で作ってみましょう。
+
+1. フィールド定義
+// fields.ts
+export enum DecisionField {
+  DocType = "DocType",
+  DocName = "DocName",
+  DocSubject = "DocSubject",
+  CreatedAt = "CreatedAt",
+  PrimaryFlg = "PrimaryFlg",
+}
+👉 enum の値を文字列にしておくと、JSON化や外部連携（Excelエクスポート等）が楽になります。
+（数字でもいいですが "DocType" のようにしておくと人間にわかりやすいです）
+
+2. ルールの型定義
+// fieldRules.ts
+import { DecisionField } from "./fields";
+
+export type FieldRule = {
+  visible: boolean;
+  editable: boolean;
+};
+
+// 例えばフォームの状態を定義
+export type FormState = "create" | "edit" | "view";
+
+// 「FormState × Field」のマトリクス
+export const fieldRules: Record<FormState, Record<DecisionField, FieldRule>> = {
+  create: {
+    [DecisionField.DocType]:    { visible: true,  editable: true },
+    [DecisionField.DocName]:    { visible: true,  editable: true },
+    [DecisionField.DocSubject]: { visible: true,  editable: true },
+    [DecisionField.CreatedAt]:  { visible: false, editable: false },
+    [DecisionField.PrimaryFlg]: { visible: true,  editable: true },
+  },
+  edit: {
+    [DecisionField.DocType]:    { visible: true,  editable: false },
+    [DecisionField.DocName]:    { visible: true,  editable: true },
+    [DecisionField.DocSubject]: { visible: true,  editable: true },
+    [DecisionField.CreatedAt]:  { visible: true,  editable: false },
+    [DecisionField.PrimaryFlg]: { visible: true,  editable: true },
+  },
+  view: {
+    [DecisionField.DocType]:    { visible: true,  editable: false },
+    [DecisionField.DocName]:    { visible: true,  editable: false },
+    [DecisionField.DocSubject]: { visible: true,  editable: false },
+    [DecisionField.CreatedAt]:  { visible: true,  editable: false },
+    [DecisionField.PrimaryFlg]: { visible: true,  editable: false },
+  },
+};
+3. composable で取り出す
+// useFieldControl.ts
+import { computed } from "vue";
+import { DecisionField } from "@/config/fields";
+import { fieldRules, FormState } from "@/config/fieldRules";
+
+export function useFieldControl(formState: FormState) {
+  const getFieldRule = (field: DecisionField) =>
+    fieldRules[formState][field] ?? { visible: false, editable: false };
+
+  return {
+    getFieldRule,
+    isVisible: (field: DecisionField) =>
+      computed(() => getFieldRule(field).visible),
+    isEditable: (field: DecisionField) =>
+      computed(() => getFieldRule(field).editable),
+  };
+}
+4. コンポーネントで使う例
+<script setup lang="ts">
+import { DecisionField } from "@/config/fields";
+import { useFieldControl } from "@/composables/useFieldControl";
+
+const formState = "edit"; // propsやpiniaから取得
+const { isVisible, isEditable } = useFieldControl(formState);
+
+const form = reactive({
+  [DecisionField.DocType]: "",
+  [DecisionField.DocName]: "",
+  [DecisionField.DocSubject]: "",
+  [DecisionField.CreatedAt]: "",
+  [DecisionField.PrimaryFlg]: false,
+});
+</script>
+
+<template>
+  <v-form>
+    <v-text-field
+      v-if="isVisible(DecisionField.DocType)"
+      v-model="form[DecisionField.DocType]"
+      :disabled="!isEditable(DecisionField.DocType)"
+      label="Document Type"
+    />
+    <v-text-field
+      v-if="isVisible(DecisionField.DocName)"
+      v-model="form[DecisionField.DocName]"
+      :disabled="!isEditable(DecisionField.DocName)"
+      label="Document Name"
+    />
+    <!-- 以下省略 -->
+  </v-form>
+</template>
+これでまず enum → ルール → composable → コンポーネント の流れができました。
+あとは徐々に複雑な条件（ユーザー権限、APIレスポンス依存など）をルールや関数に組み込めます。
+
+👉 次のステップとしては、
+
+ルールを 固定の表（コード化） で持つのか
+
+Excel → JSON にエクスポートして 外部定義 で読み込むのか
+
+を決めると拡張性が変わります。
+
+どちらを優先したいですか？
+
+あなた:
+そこに進む前に、まずデータを整理したいです。
+フィールドは
+export enum DecisionField {
+  DocType,
+  DocName,
+  DocSubject,
+  CreatedAt,
+  PrimaryFlg,
+}
+
+ページのモードは以下のように定義します。
+
+
+export enum DocMode {
+  Create,
+  Edit,
+  EditAfterProposal,
+  View,
+}
+
+で、decision.vueは今のところ以下のような感じです
+<script setup lang="ts">
+import type { DocMode } from '~/composables/tmp';
+
+type Props = {
+  docMode: DocMode;
+  consttType: string;
+  submissionType: string;
+  freeInput: boolean;
+};
+
+defineProps<Props>();
+</script>
+
+<template>
+</template>
+
+
+ChatGPT:
+なるほど 👍
+今の段階では 「フィールド一覧（DecisionField）」 と 「モード一覧（DocMode）」 が整理できて、decision.vue では props として docMode や周辺条件を受け取る形になってますね。
+
+ここで整理しておくと後でルール管理が楽になります。
+次のステップとしては、「どの軸でフィールドの状態が決まるか」 をはっきりさせることです。
+
+1. 現状の軸
+フィールド: DecisionField
+
+モード: DocMode
+
+propsから渡される追加条件:
+
+constType: string
+
+submissionType: string
+
+freeInput: boolean
+
+2. 今後のルール設計で必要そうなこと
+① 「最小マトリクス」
+まずは「DocMode × Field → visible/editable」を基本マトリクスにするのがよいです。
+これは Excel の表と一番対応しやすい。
+
+例（イメージ）:
+
+Field	Create (表示/編集)	Edit (表示/編集)	EditAfterProposal (表示/編集)	View (表示/編集)
+DocType	○/○	○/×	○/×	○/×
+DocName	○/○	○/○	○/×	○/×
+DocSubject	○/○	○/○	○/○	○/×
+CreatedAt	×/×	○/×	○/×	○/×
+PrimaryFlg	○/○	○/○	○/×	○/×
+② 「追加条件による分岐」
+次に constType, submissionType, freeInput のような フィールドごとの追加条件 を組み込む必要が出ます。
+
+例えば:
+
+freeInput = false のとき DocSubject は編集不可
+
+submissionType = "draft" のときだけ PrimaryFlg を隠す
+
+constType = "X" のとき DocType は編集不可
+
+こういった条件を 基本マトリクスに後付けでオーバーライドする形 にすれば整理しやすいです。
+
+3. 整理方針（提案）
+基本ルール: DocMode × DecisionField のマトリクスを定義（シンプル）
+
+追加条件ルール: props を見てオーバーライドするロジックを composable で実装
+
+4. データ構造のたたき台
+// fieldRules.ts
+import { DecisionField } from "./fields";
+import { DocMode } from "./modes";
+
+export type FieldRule = {
+  visible: boolean;
+  editable: boolean;
+};
+
+export const baseRules: Record<DocMode, Record<DecisionField, FieldRule>> = {
+  [DocMode.Create]: {
+    [DecisionField.DocType]:    { visible: true, editable: true },
+    [DecisionField.DocName]:    { visible: true, editable: true },
+    [DecisionField.DocSubject]: { visible: true, editable: true },
+    [DecisionField.CreatedAt]:  { visible: false, editable: false },
+    [DecisionField.PrimaryFlg]: { visible: true, editable: true },
+  },
+  [DocMode.Edit]: {
+    [DecisionField.DocType]:    { visible: true, editable: false },
+    [DecisionField.DocName]:    { visible: true, editable: true },
+    [DecisionField.DocSubject]: { visible: true, editable: true },
+    [DecisionField.CreatedAt]:  { visible: true, editable: false },
+    [DecisionField.PrimaryFlg]: { visible: true, editable: true },
+  },
+  [DocMode.EditAfterProposal]: {
+    [DecisionField.DocType]:    { visible: true, editable: false },
+    [DecisionField.DocName]:    { visible: true, editable: false },
+    [DecisionField.DocSubject]: { visible: true, editable: true },
+    [DecisionField.CreatedAt]:  { visible: true, editable: false },
+    [DecisionField.PrimaryFlg]: { visible: true, editable: false },
+  },
+  [DocMode.View]: {
+    [DecisionField.DocType]:    { visible: true, editable: false },
+    [DecisionField.DocName]:    { visible: true, editable: false },
+    [DecisionField.DocSubject]: { visible: true, editable: false },
+    [DecisionField.CreatedAt]:  { visible: true, editable: false },
+    [DecisionField.PrimaryFlg]: { visible: true, editable: false },
+  },
+};
+5. decision.vue での使い方イメージ
+<script setup lang="ts">
+import { baseRules } from "@/config/fieldRules";
+import { DecisionField } from "@/config/fields";
+import { DocMode } from "@/config/modes";
+
+type Props = {
+  docMode: DocMode;
+  constType: string;
+  submissionType: string;
+  freeInput: boolean;
+};
+const props = defineProps<Props>();
+
+// 基本ルールを参照
+const getRule = (field: DecisionField) => {
+  const base = baseRules[props.docMode][field];
+
+  // --- 追加条件によるオーバーライド例 ---
+  if (field === DecisionField.DocSubject && !props.freeInput) {
+    return { ...base, editable: false };
+  }
+  if (field === DecisionField.PrimaryFlg && props.submissionType === "draft") {
+    return { ...base, visible: false };
+  }
+
+  return base;
+};
+</script>
+
+<template>
+  <v-text-field
+    v-if="getRule(DecisionField.DocName).visible"
+    v-model="form.docName"
+    :disabled="!getRule(DecisionField.DocName).editable"
+    label="Document Name"
+  />
+</template>
+ここまでで、
+✅ enum でフィールド・モードを定義
+✅ 基本マトリクス（DocMode × Field）を作成
+✅ 追加条件（props）でオーバーライド
+
+という仕組みが整理できます。
+
+質問です ✋
+Excel に整理されているルールは「DocMode × Field」の基本形ですか？
+それとも「DocMode × Field」に加えて constType や submissionType などの条件も含まれていますか？
+
+あなた:
+ルールはリアクティブにしたいです。computedにする必要はありませんか
+ChatGPT:
+いい視点です！
+
+結論からいうと：
+
+リアクティブにしたいなら computed を使うのがベスト です。
+
+ただし、全ケースで computed が必要というわけではなく、「props や store の値に依存する場合」に使えば十分です。
+
+なぜ computed が必要か？
+decision.vue の場合、ルールは
+
+docMode（props）
+
+constType（props）
+
+submissionType（props）
+
+freeInput（props）
+
+などに依存します。
+これらが変化したらルールも自動的に変わってほしいですよね？
+
+👉 そのときに computed を使うと リアクティブに依存関係を追跡できます。
+
+実装イメージ
+<script setup lang="ts">
+import { baseRules } from "@/config/fieldRules";
+import { DecisionField } from "@/config/fields";
+import { DocMode } from "@/config/modes";
+
+type Props = {
+  docMode: DocMode;
+  constType: string;
+  submissionType: string;
+  freeInput: boolean;
+};
+const props = defineProps<Props>();
+
+// フィールドごとのルールを reactive/computed で返す
+const getRule = (field: DecisionField) =>
+  computed(() => {
+    const base = baseRules[props.docMode][field];
+
+    // --- 追加条件によるオーバーライド例 ---
+    if (field === DecisionField.DocSubject && !props.freeInput) {
+      return { ...base, editable: false };
+    }
+    if (field === DecisionField.PrimaryFlg && props.submissionType === "draft") {
+      return { ...base, visible: false };
+    }
+
+    return base;
+  });
+</script>
+
+<template>
+  <v-text-field
+    v-if="getRule(DecisionField.DocName).value.visible"
+    v-model="form.docName"
+    :disabled="!getRule(DecisionField.DocName).value.editable"
+    label="Document Name"
+  />
+</template>
+ポイント
+computed を使えば props が変わったときにルールも再計算されます。
+
+「すべてのフィールドに対して computed を毎回呼ぶのは面倒…」なら、
+一括で reactive なルールオブジェクトを返す方法もアリです。
+
+一括生成パターン
+const rules = computed(() => {
+  const current = baseRules[props.docMode];
+  return {
+    [DecisionField.DocType]: {
+      ...current[DecisionField.DocType],
+    },
+    [DecisionField.DocName]: {
+      ...current[DecisionField.DocName],
+    },
+    [DecisionField.DocSubject]: {
+      ...current[DecisionField.DocSubject],
+      editable: props.freeInput ? current[DecisionField.DocSubject].editable : false,
+    },
+    [DecisionField.CreatedAt]: {
+      ...current[DecisionField.CreatedAt],
+    },
+    [DecisionField.PrimaryFlg]: {
+      ...current[DecisionField.PrimaryFlg],
+      visible:
+        props.submissionType === "draft"
+          ? false
+          : current[DecisionField.PrimaryFlg].visible,
+    },
+  };
+});
+Vue テンプレートではこう使えます:
+
+<v-text-field
+  v-if="rules[DecisionField.DocName].visible"
+  v-model="form.docName"
+  :disabled="!rules[DecisionField.DocName].editable"
+/>
+✅ まとめると：
+
+ルールが props や store の状態に依存するなら computed にするべき
+
+フィールドごとに個別 computed でもいいし、まとめて rules を computed にしてもいい
+
+ご質問ですが、フィールド数は結構多いですか？
+もし数十項目あるなら「一括生成」のほうがスッキリしますが、少ないなら「getRule(field) を computed にする」方式でも良いです。
+
+あなた:
+form.docNameのformをrefで定義しても良いですか
+ChatGPT:
+はい 👍 form を ref で定義しても問題ありません。
+ただし、Vue 3 では ref と reactive で扱い方が少し違うので整理しておきます。
+
+1. reactive の場合（よく使うパターン）
+const form = reactive({
+  docType: "",
+  docName: "",
+  docSubject: "",
+  createdAt: "",
+  primaryFlg: false,
+});
+テンプレートではそのまま参照できます：
+
+<v-text-field v-model="form.docName" />
+2. ref の場合（OKだけどアクセス方法が違う）
+const form = ref({
+  docType: "",
+  docName: "",
+  docSubject: "",
+  createdAt: "",
+  primaryFlg: false,
+});
+この場合、form 自体が Ref<{...}> になるので、中身にアクセスするには .value が必要です。
+
+<v-text-field v-model="form.value.docName" />
+3. どちらが良いか？
+reactive
+
+フォームデータ全体をひとつのオブジェクトで扱うならこれが自然
+
+v-model="form.docName" のようにシンプルに書ける
+
+フィールド数が多い業務アプリではこちらがおすすめ
+
+ref
+
+APIレスポンスや props 丸ごとを一旦 ref に入れる場合に使いやすい
+
+form.value.xxx と書く必要があるのでフォーム用途ではちょっと冗長
+
+✅ 結論:
+
+フォーム入力用のオブジェクトは reactive が一般的でおすすめ
+
+特別な理由（form を別の型付きオブジェクトとして差し替えたい等）があるなら ref でもOK
+
+質問ですが、ユーザーさんのケースでは「form を API レスポンスで丸ごと差し替える」ことはありそうですか？
+（もしそうなら ref のほうが相性いいですし、そうでなければ reactive のほうが書きやすいです）
+
+あなた:
+はい、あります。refで定義したいです
+ChatGPT:
+了解です 👍
+API レスポンスで form を丸ごと差し替える可能性があるなら、ref で定義するのが正解です。
+
+サンプル実装（ref パターン）
+<script setup lang="ts">
+import { ref, onMounted } from "vue";
+
+type FormData = {
+  docType: string;
+  docName: string;
+  docSubject: string;
+  createdAt: string;
+  primaryFlg: boolean;
+};
+
+// フォームをrefで定義
+const form = ref<FormData>({
+  docType: "",
+  docName: "",
+  docSubject: "",
+  createdAt: "",
+  primaryFlg: false,
+});
+
+// API から取得して丸ごと代入
+onMounted(async () => {
+  const res = await $fetch<FormData>("/api/document/123");
+  form.value = res;
+});
+</script>
+
+<template>
+  <v-form>
+    <v-text-field
+      v-model="form.value.docName"
+      label="Document Name"
+    />
+    <v-text-field
+      v-model="form.value.docSubject"
+      label="Document Subject"
+    />
+    <v-select
+      v-model="form.value.docType"
+      :items="['report','memo','proposal']"
+      label="Document Type"
+    />
+  </v-form>
+</template>
+ポイント
+form.value が必須
+
+ref で定義したので、テンプレートやスクリプト内では必ず .value を付ける。
+
+reactive の場合は不要だった部分。
+
+API レスポンスでそのまま上書きできる
+
+form.value = res;
+reactive だと Object.assign(form, res) みたいなことをしないと差し替えできないので、ref の方がシンプル。
+
+型定義をつけると安心
+
+FormData 型を用意して ref<FormData>(...) にすると、API との型チェックが効く。
+
+✅ まとめると
+
+API レスポンスを丸ごと代入したいなら ref
+
+細かく v-model="form.xxx" でシンプルに書きたいなら reactive
+
+質問ですが：
+API のレスポンスは「そのままフォームに使える構造」になっていますか？
+それとも「一部を変換（例: createdAt を日付型に変換）」してから form に入れたいイメージですか？
+
+あなた:
+編集と表示のbooleanを決める要素docmode以外にもあります。まず上の方にも書いたのですが
+{ docMode: DocMode; constrType: string; submissionType: string; freeInput: boolean; };です
+ChatGPT:
+なるほど！ありがとうございます 🙌
+整理すると、フィールドの visible / editable を決める要素は、
+
+docMode（ページモード）
+
+constrType（工事種別みたいなもの？）
+
+submissionType（提出種別）
+
+freeInput（フリーテキスト入力可否）
+
+の 4 つですね。
+
+🎯 設計の考え方
+基本マトリクス
+
+DocMode × Field → visible/editable
+
+これは「どのモードなら編集できるか」のベースルール
+
+条件付きオーバーライド
+
+constrType, submissionType, freeInput によって、ベースルールを上書き
+
+例:
+
+freeInput = false → DocSubject は editable: false
+
+submissionType = "draft" → PrimaryFlg は visible: false
+
+constrType = "X" → DocType は editable: false
+
+型とデータ構造（たたき台）
+// types.ts
+import { DecisionField } from "./fields";
+import { DocMode } from "./modes";
+
+export type FieldRule = {
+  visible: boolean;
+  editable: boolean;
+};
+
+export type RuleContext = {
+  docMode: DocMode;
+  constrType: string;
+  submissionType: string;
+  freeInput: boolean;
+};
+基本ルール（マトリクス）
+// baseRules.ts
+import { DecisionField } from "./fields";
+import { DocMode } from "./modes";
+import type { FieldRule } from "./types";
+
+export const baseRules: Record<DocMode, Record<DecisionField, FieldRule>> = {
+  [DocMode.Create]: {
+    [DecisionField.DocType]:    { visible: true, editable: true },
+    [DecisionField.DocName]:    { visible: true, editable: true },
+    [DecisionField.DocSubject]: { visible: true, editable: true },
+    [DecisionField.CreatedAt]:  { visible: false, editable: false },
+    [DecisionField.PrimaryFlg]: { visible: true, editable: true },
+  },
+  [DocMode.Edit]: {
+    [DecisionField.DocType]:    { visible: true, editable: false },
+    [DecisionField.DocName]:    { visible: true, editable: true },
+    [DecisionField.DocSubject]: { visible: true, editable: true },
+    [DecisionField.CreatedAt]:  { visible: true, editable: false },
+    [DecisionField.PrimaryFlg]: { visible: true, editable: true },
+  },
+  [DocMode.EditAfterProposal]: {
+    [DecisionField.DocType]:    { visible: true, editable: false },
+    [DecisionField.DocName]:    { visible: true, editable: false },
+    [DecisionField.DocSubject]: { visible: true, editable: true },
+    [DecisionField.CreatedAt]:  { visible: true, editable: false },
+    [DecisionField.PrimaryFlg]: { visible: true, editable: false },
+  },
+  [DocMode.View]: {
+    [DecisionField.DocType]:    { visible: true, editable: false },
+    [DecisionField.DocName]:    { visible: true, editable: false },
+    [DecisionField.DocSubject]: { visible: true, editable: false },
+    [DecisionField.CreatedAt]:  { visible: true, editable: false },
+    [DecisionField.PrimaryFlg]: { visible: true, editable: false },
+  },
+};
+条件付きオーバーライド
+// useFieldControl.ts
+import { computed } from "vue";
+import { baseRules } from "@/config/baseRules";
+import { DecisionField } from "@/config/fields";
+import type { RuleContext, FieldRule } from "@/config/types";
+
+export function useFieldControl(ctx: RuleContext) {
+  const getRule = (field: DecisionField) =>
+    computed<FieldRule>(() => {
+      const base = baseRules[ctx.docMode][field];
+
+      let rule = { ...base };
+
+      // freeInput の条件
+      if (field === DecisionField.DocSubject && !ctx.freeInput) {
+        rule = { ...rule, editable: false };
+      }
+
+      // submissionType の条件
+      if (field === DecisionField.PrimaryFlg && ctx.submissionType === "draft") {
+        rule = { ...rule, visible: false };
+      }
+
+      // constrType の条件（例）
+      if (field === DecisionField.DocType && ctx.constrType === "X") {
+        rule = { ...rule, editable: false };
+      }
+
+      return rule;
+    });
+
+  return { getRule };
+}
+コンポーネントでの使い方
+<script setup lang="ts">
+import { useFieldControl } from "@/composables/useFieldControl";
+import { DecisionField } from "@/config/fields";
+import type { DocMode } from "@/config/modes";
+
+const props = defineProps<{
+  docMode: DocMode;
+  constrType: string;
+  submissionType: string;
+  freeInput: boolean;
+}>();
+
+const { getRule } = useFieldControl(props);
+
+const form = ref({
+  docType: "",
+  docName: "",
+  docSubject: "",
+  createdAt: "",
+  primaryFlg: false,
+});
+</script>
+
+<template>
+  <v-text-field
+    v-if="getRule(DecisionField.DocName).value.visible"
+    v-model="form.value.docName"
+    :disabled="!getRule(DecisionField.DocName).value.editable"
+    label="Document Name"
+  />
+</template>
+✅ この形なら
+
+基本マトリクスはシンプルに定義
+
+追加条件は computed で動的オーバーライド
+
+props が変わればルールも自動更新
+
+できます。
+
+ご質問ですが、この 4 要素（docMode, constrType, submissionType, freeInput）以外にも条件要素が増える可能性はありますか？
+（もし増えるなら「ルールを関数化して順番に適用する」仕組みを作るのがスッキリします）
+
+あなた:
+すいません。もう一つ追加です。DocStatusです。これは10個以上の状態があります
+ChatGPT:
+なるほど！「DocStatus」まで入ってくると、一気に条件の組み合わせが爆発しますね 🚀
+整理していくときは 「ベースルール」＋「条件ごとのオーバーライド」 の考え方をさらに拡張するのが良さそうです。
+
+🗂 条件一覧（現状）
+docMode（表示/編集モード）
+
+constrType（工事種別）
+
+submissionType（提出種別）
+
+freeInput（フリー入力可否）
+
+docStatus（ドキュメント状態 ← 新規）
+
+設計方針
+基本マトリクス（docMode × Field）
+
+ここで「最低限の可視性・編集可否」を定義する
+
+条件オーバーライド（constrType, submissionType, freeInput, docStatus）
+
+個別の条件を関数で順番に適用する
+
+追加の条件が出ても関数を足すだけ
+
+ルール適用パイプライン化
+// types.ts
+import { DecisionField } from "./fields";
+import { DocMode } from "./modes";
+
+export type FieldRule = {
+  visible: boolean;
+  editable: boolean;
+};
+
+export type RuleContext = {
+  docMode: DocMode;
+  constrType: string;
+  submissionType: string;
+  freeInput: boolean;
+  docStatus: string; // 10個以上の状態
+};
+
+// ルール適用関数の型
+export type RuleApplier = (field: DecisionField, base: FieldRule, ctx: RuleContext) => FieldRule;
+条件オーバーライド関数
+// ruleAppliers.ts
+import { DecisionField } from "./fields";
+import type { RuleApplier } from "./types";
+
+// freeInput のルール
+export const applyFreeInput: RuleApplier = (field, base, ctx) => {
+  if (field === DecisionField.DocSubject && !ctx.freeInput) {
+    return { ...base, editable: false };
+  }
+  return base;
+};
+
+// submissionType のルール
+export const applySubmissionType: RuleApplier = (field, base, ctx) => {
+  if (field === DecisionField.PrimaryFlg && ctx.submissionType === "draft") {
+    return { ...base, visible: false };
+  }
+  return base;
+};
+
+// constrType のルール
+export const applyConstrType: RuleApplier = (field, base, ctx) => {
+  if (field === DecisionField.DocType && ctx.constrType === "X") {
+    return { ...base, editable: false };
+  }
+  return base;
+};
+
+// docStatus のルール
+export const applyDocStatus: RuleApplier = (field, base, ctx) => {
+  // 例: "approved" のときは全項目編集不可
+  if (ctx.docStatus === "approved") {
+    return { ...base, editable: false };
+  }
+
+  // 例: "archived" のときは DocSubject 非表示
+  if (ctx.docStatus === "archived" && field === DecisionField.DocSubject) {
+    return { ...base, visible: false };
+  }
+
+  return base;
+};
+ルール適用処理
+// useFieldControl.ts
+import { computed } from "vue";
+import { baseRules } from "@/config/baseRules";
+import { DecisionField } from "@/config/fields";
+import type { RuleContext, FieldRule, RuleApplier } from "@/config/types";
+import {
+  applyFreeInput,
+  applySubmissionType,
+  applyConstrType,
+  applyDocStatus,
+} from "@/config/ruleAppliers";
+
+// 適用関数を順番に並べる
+const appliers: RuleApplier[] = [
+  applyFreeInput,
+  applySubmissionType,
+  applyConstrType,
+  applyDocStatus,
+];
+
+export function useFieldControl(ctx: RuleContext) {
+  const getRule = (field: DecisionField) =>
+    computed<FieldRule>(() => {
+      let rule = { ...baseRules[ctx.docMode][field] };
+
+      // appliers を順番に適用
+      for (const apply of appliers) {
+        rule = apply(field, rule, ctx);
+      }
+
+      return rule;
+    });
+
+  return { getRule };
+}
+メリット
+DocStatus が10個以上あっても大丈夫
+→ applyDocStatus の中に switch (ctx.docStatus) を書けば整理できる
+
+条件が増えても関数を追加するだけ
+→ 既存のコードを壊さずに拡張可能
+
+テストが書きやすい
+→ applyDocStatus(field, base, { docStatus: "approved", ... }) のように単体テスト可能
+
+ここで質問なのですが、
+📌 docStatus の 10個以上の状態って「ワークフロー的な進行状態」でしょうか？
+（例: draft, submitted, approved, rejected, archived...）
+
+もしそうなら、状態遷移の図をベースにまとめた方が整理しやすいと思うのですが、状態一覧を出していただけますか？
+
+あなた:
+すべての条件を元に、decisionFieldのキーに対する値を設定することはできませんか
+ChatGPT:
+できます 👍
+つまり「すべての条件（docMode / constrType / submissionType / freeInput / docStatus）を一度に考慮して、各フィールドの visible / editable を最終決定する」という形ですね。
+
+アプローチ
+ベースルール（docMode × field）を定義しておく
+
+これは「最低限のデフォルト状態」
+
+条件評価関数を合成して、最終ルールオブジェクトを作成
+
+Record<DecisionField, FieldRule> をまるごと返す
+
+Vue なら computed にしておけばリアクティブに追従可能
+
+実装イメージ
+// types.ts
+import { DecisionField } from "./fields";
+import { DocMode } from "./modes";
+
+export type FieldRule = {
+  visible: boolean;
+  editable: boolean;
+};
+
+export type RuleContext = {
+  docMode: DocMode;
+  constrType: string;
+  submissionType: string;
+  freeInput: boolean;
+  docStatus: string;
+};
+
+export type FieldRules = Record<DecisionField, FieldRule>;
+ベースルール
+// baseRules.ts
+import { DecisionField } from "./fields";
+import { DocMode } from "./modes";
+import type { FieldRules } from "./types";
+
+export const baseRules: Record<DocMode, FieldRules> = {
+  [DocMode.Create]: {
+    [DecisionField.DocType]: { visible: true, editable: true },
+    [DecisionField.DocName]: { visible: true, editable: true },
+    [DecisionField.DocSubject]: { visible: true, editable: true },
+    [DecisionField.CreatedAt]: { visible: true, editable: false },
+    [DecisionField.PrimaryFlg]: { visible: true, editable: true },
+  },
+  [DocMode.Edit]: {
+    [DecisionField.DocType]: { visible: true, editable: false },
+    [DecisionField.DocName]: { visible: true, editable: true },
+    [DecisionField.DocSubject]: { visible: true, editable: true },
+    [DecisionField.CreatedAt]: { visible: true, editable: false },
+    [DecisionField.PrimaryFlg]: { visible: true, editable: true },
+  },
+  [DocMode.EditAfterProposal]: { /* ...省略 */ } as FieldRules,
+  [DocMode.View]: {
+    [DecisionField.DocType]: { visible: true, editable: false },
+    [DecisionField.DocName]: { visible: true, editable: false },
+    [DecisionField.DocSubject]: { visible: true, editable: false },
+    [DecisionField.CreatedAt]: { visible: true, editable: false },
+    [DecisionField.PrimaryFlg]: { visible: true, editable: false },
+  },
+};
+ルール合成処理
+// useFieldRules.ts
+import { computed } from "vue";
+import { baseRules } from "./baseRules";
+import { DecisionField } from "./fields";
+import type { RuleContext, FieldRules } from "./types";
+
+export function useFieldRules(ctx: RuleContext) {
+  const rules = computed<FieldRules>(() => {
+    // まず baseRules をコピー
+    const result: FieldRules = { ...baseRules[ctx.docMode] };
+
+    // freeInput の反映
+    if (!ctx.freeInput) {
+      result[DecisionField.DocSubject] = {
+        ...result[DecisionField.DocSubject],
+        editable: false,
+      };
+    }
+
+    // submissionType の反映
+    if (ctx.submissionType === "draft") {
+      result[DecisionField.PrimaryFlg] = {
+        ...result[DecisionField.PrimaryFlg],
+        visible: false,
+      };
+    }
+
+    // constrType の反映
+    if (ctx.constrType === "X") {
+      result[DecisionField.DocType] = {
+        ...result[DecisionField.DocType],
+        editable: false,
+      };
+    }
+
+    // docStatus の反映
+    switch (ctx.docStatus) {
+      case "approved":
+        // 全フィールド編集不可
+        for (const key of Object.values(DecisionField)) {
+          result[key as DecisionField] = { ...result[key as DecisionField], editable: false };
+        }
+        break;
+
+      case "archived":
+        result[DecisionField.DocSubject] = {
+          ...result[DecisionField.DocSubject],
+          visible: false,
+        };
+        break;
+    }
+
+    return result;
+  });
+
+  return { rules };
+}
+利用例
+<script setup lang="ts">
+import { DecisionField } from "@/config/fields";
+import { DocMode } from "@/config/modes";
+import { useFieldRules } from "@/config/useFieldRules";
+
+const ctx = reactive({
+  docMode: DocMode.Edit,
+  constrType: "X",
+  submissionType: "draft",
+  freeInput: false,
+  docStatus: "approved",
+});
+
+const { rules } = useFieldRules(ctx);
+</script>
+
+<template>
+  <v-text-field
+    v-if="rules[DecisionField.DocName].visible"
+    v-model="form.value.docName"
+    label="Document Name"
+    :disabled="!rules[DecisionField.DocName].editable"
+  />
+</template>
+✅ この方法なら「すべての条件を一度に考慮して、DecisionField ごとの最終状態を一括で作れる」ので、マトリクスをほぼそのままコード化できます。
+
+質問です：
+👉 Excel のマトリクスって「最終形（すべての条件を反映済みの表示/編集状態）」が書いてある感じですか？
+それとも「docMode × field のベースルール」だけがあって、他条件は補足で書いてある感じですか？
+
+あなた:
+いや、条件関数を使うのではなく、一発でキーバリューでできませんか。objectじゃなくてmapでもいいです
+ChatGPT:
+なるほど！
+「関数を積み重ねて条件判定する」のではなくて、一発で DecisionField ごとの最終状態を Map や Object で持ちたいということですね。
+
+つまりこういう形を目指している、という理解で合ってますか？
+
+// Map を使った例
+const rules = new Map<
+  DecisionField,
+  { visible: boolean; editable: boolean }
+>([
+  [DecisionField.DocType, { visible: true, editable: false }],
+  [DecisionField.DocName, { visible: true, editable: true }],
+  [DecisionField.DocSubject, { visible: false, editable: false }],
+  [DecisionField.CreatedAt, { visible: true, editable: false }],
+  [DecisionField.PrimaryFlg, { visible: true, editable: true }],
+]);
+どうやって一発で決めるか？
+これは「複数の条件をキーにした辞書」を持っておけば可能です。
+つまり (docMode, constrType, submissionType, freeInput, docStatus) の組み合わせをキーにして、そのときの全フィールドルールを値にするイメージです。
+
+例: ルール定義（Map 版）
+import { DecisionField } from "./fields";
+import { DocMode } from "./modes";
+import type { FieldRules } from "./types";
+
+// コンテキストキーを文字列化して扱う
+function ctxKey(
+  docMode: DocMode,
+  constrType: string,
+  submissionType: string,
+  freeInput: boolean,
+  docStatus: string
+) {
+  return `${docMode}|${constrType}|${submissionType}|${freeInput}|${docStatus}`;
+}
+
+// ルール辞書
+const ruleMatrix = new Map<string, FieldRules>();
+
+// 例: Create × constrType=A × submissionType=draft × freeInput=true × status=draft
+ruleMatrix.set(
+  ctxKey(DocMode.Create, "A", "draft", true, "draft"),
+  {
+    [DecisionField.DocType]: { visible: true, editable: true },
+    [DecisionField.DocName]: { visible: true, editable: true },
+    [DecisionField.DocSubject]: { visible: true, editable: true },
+    [DecisionField.CreatedAt]: { visible: true, editable: false },
+    [DecisionField.PrimaryFlg]: { visible: true, editable: false },
+  }
+);
+
+// 例: View × constrType=B × submissionType=final × freeInput=false × status=approved
+ruleMatrix.set(
+  ctxKey(DocMode.View, "B", "final", false, "approved"),
+  {
+    [DecisionField.DocType]: { visible: true, editable: false },
+    [DecisionField.DocName]: { visible: true, editable: false },
+    [DecisionField.DocSubject]: { visible: false, editable: false },
+    [DecisionField.CreatedAt]: { visible: true, editable: false },
+    [DecisionField.PrimaryFlg]: { visible: false, editable: false },
+  }
+);
+利用側
+function getFieldRules(ctx: {
+  docMode: DocMode;
+  constrType: string;
+  submissionType: string;
+  freeInput: boolean;
+  docStatus: string;
+}): FieldRules | undefined {
+  return ruleMatrix.get(
+    ctxKey(
+      ctx.docMode,
+      ctx.constrType,
+      ctx.submissionType,
+      ctx.freeInput,
+      ctx.docStatus
+    )
+  );
+}
+
+// 使うとき
+const rules = getFieldRules({
+  docMode: DocMode.View,
+  constrType: "B",
+  submissionType: "final",
+  freeInput: false,
+  docStatus: "approved",
+});
+
+if (rules) {
+  console.log(rules[DecisionField.DocName].editable); // false
+}
+メリット
+一発で O(1) で引ける
+
+Excel のマトリクスをそのままデータ化できる
+
+「関数の積み重ね」不要でシンプル
+
+デメリット
+組み合わせ爆発：条件が多いとルール表の数が膨大になる
+
+全てのパターンを網羅するか、デフォルト処理をどうするか考える必要がある
+
+✅ まとめ
+
+「すべての条件をキーにして Map に保持する」方式なら、一発で最終的なルールを決められます。
+
+ただし条件組み合わせが多い場合、Excel をそのまま JSON/TS 化するイメージになります。
+
+質問ですが：
+👉 Excel のマトリクスって「全組み合わせを網羅している表」なんですか？
+それとも「基本パターン＋例外条件」みたいに書かれてますか？
+
+あなた:
+デフォルトパターンとか特になくて、それぞれ個別に考慮する必要があるので、baseパターンとか定義しづらい感じのデータです
+ChatGPT:
+なるほど！理解しました。
+つまり 「baseルール＋例外」みたいな整理はできなくて、Excelに書いてある1行1行が唯一の正解ルール」 って感じですね。
+
+そういう場合はまさに 全条件組み合わせをキーにして、最終ルールをMapやObjectで直接管理する のがベストです 👍
+
+実装イメージ
+1. 条件を文字列キーに変換する関数
+function ctxKey(
+  docMode: DocMode,
+  constrType: string,
+  submissionType: string,
+  freeInput: boolean,
+  docStatus: string
+) {
+  return `${docMode}|${constrType}|${submissionType}|${freeInput}|${docStatus}`;
+}
+2. ルール定義（Excelからそのまま移す）
+const ruleMatrix = new Map<string, FieldRules>();
+
+ruleMatrix.set(
+  ctxKey(DocMode.Create, "A", "draft", true, "draft"),
+  {
+    [DecisionField.DocType]: { visible: true, editable: true },
+    [DecisionField.DocName]: { visible: true, editable: true },
+    [DecisionField.DocSubject]: { visible: true, editable: true },
+    [DecisionField.CreatedAt]: { visible: true, editable: false },
+    [DecisionField.PrimaryFlg]: { visible: true, editable: false },
+  }
+);
+
+ruleMatrix.set(
+  ctxKey(DocMode.View, "B", "final", false, "approved"),
+  {
+    [DecisionField.DocType]: { visible: true, editable: false },
+    [DecisionField.DocName]: { visible: true, editable: false },
+    [DecisionField.DocSubject]: { visible: false, editable: false },
+    [DecisionField.CreatedAt]: { visible: true, editable: false },
+    [DecisionField.PrimaryFlg]: { visible: false, editable: false },
+  }
+);
+
+// ...Excelの行数分だけ ruleMatrix.set(...) を並べる
+3. 利用側
+function getFieldRules(ctx: {
+  docMode: DocMode;
+  constrType: string;
+  submissionType: string;
+  freeInput: boolean;
+  docStatus: string;
+}): FieldRules | undefined {
+  return ruleMatrix.get(
+    ctxKey(
+      ctx.docMode,
+      ctx.constrType,
+      ctx.submissionType,
+      ctx.freeInput,
+      ctx.docStatus
+    )
+  );
+}
+メリット
+Excelの表をそのままプログラム化できる
+
+一発で最終ルールが引ける（O(1)）
+
+「条件関数」や「デフォルトルール」の思考を挟まずに済む
+
+デメリット
+Excelの行が多ければ、そのままコードも大きくなる
+
+新しい条件が増えると全組み合わせを追加しなければならない
+
+✅ まとめ
+今回の「デフォルトなし・全部個別に考慮」という要件なら、
+👉 MapやObjectに「キー=条件セット」「値=フィールドルール全体」をそのまま持つ方式 が一番素直でバグも少ないです。
+
+質問なのですが：
+📌 Excelの行数はざっくりどれくらいありますか？（数十行？数百行？）
+→ 行数が多い場合は、ExcelをそのままJSONに変換して ruleMatrix を自動生成する仕組みを作ったほうがいいかもしれません。
+
+あなた:
+ctxKeyって文字列にする必要ありますか。
+ChatGPT:
+いいところに気づきましたね 👌
+必ずしも文字列化する必要はありません。
+
+選択肢
+① 文字列キー（今説明した方法）
+実装がシンプル
+
+JSON にもそのまましやすい
+
+ただしキーのフォーマット間違いに弱い（typo や "true" vs true）
+
+② 複合キーをそのまま使う
+TypeScript / JavaScript の Map は「オブジェクトやタプルそのもの」をキーにできます。
+
+type CtxKey = [DocMode, string, string, boolean, string];
+
+const ruleMatrix = new Map<CtxKey, FieldRules>();
+
+// 定義
+ruleMatrix.set(
+  [DocMode.Create, "A", "draft", true, "draft"],
+  {
+    [DecisionField.DocType]: { visible: true, editable: true },
+    [DecisionField.DocName]: { visible: true, editable: true },
+    [DecisionField.DocSubject]: { visible: true, editable: true },
+    [DecisionField.CreatedAt]: { visible: true, editable: false },
+    [DecisionField.PrimaryFlg]: { visible: true, editable: false },
+  }
+);
+
+// 利用
+const rules = ruleMatrix.get([
+  DocMode.Create,
+  "A",
+  "draft",
+  true,
+  "draft",
+]); // ❌ undefined
+⚠️ 注意点：
+配列やオブジェクトをキーにした場合、参照が同じでないと一致しません。
+つまり、[DocMode.Create, "A", "draft", true, "draft"] を set した後、同じ内容の別配列を get に使うと一致しません。
+
+→ なのでこの方法は「ctxKey関数を通じて常に同じ参照を使う」仕組みが必要になります。
+
+③ オブジェクトをキーにする
+type CtxKeyObj = {
+  docMode: DocMode;
+  constrType: string;
+  submissionType: string;
+  freeInput: boolean;
+  docStatus: string;
+};
+
+const ruleMatrix = new Map<CtxKeyObj, FieldRules>();
+
+const key: CtxKeyObj = {
+  docMode: DocMode.Create,
+  constrType: "A",
+  submissionType: "draft",
+  freeInput: true,
+  docStatus: "draft",
+};
+
+ruleMatrix.set(key, { ... });
+ruleMatrix.get(key); // ✅ これは取れる
+⚠️ これもオブジェクトの参照が同じでないとヒットしないので、結局「一発でキーを生成する関数」が必要。
+
+④ 安全＆実用的なのは「文字列化」
+参照問題を避けるためには「ctxKey関数で一貫して文字列化して使う」のが一番扱いやすいです。
+Excel や JSON にもそのまま落とし込めますし。
+
+結論
+小規模・シンプルに管理するなら文字列キーがベスト
+
+型安全性を高めたいなら独自の enum / union 型を組み合わせて、キーを string にしても問題なし
+
+もしどうしても Map のタプルキーを使いたいなら → 参照を統一する仕組み（例: const allKeys = { ... } に事前定義してそこから参照）を必ず用意する
+
+👉 質問です：
+Excel のマトリクスを「そのままJSON/TSに変換して読み込む」想定ですか？
+それとも「コードに直接書き込んで管理」する感じですか？
+
+あなた:
+[DocMode.Create, "A", "draft", true, "draft"]のような部分をキーにする代わりに、mapのキーはdecisionFiledにして、値の方を[DocMode.Create, "A", "draft", true, "draft"],とかのデータを列挙する形式には出きませんか
+ChatGPT:
+なるほど 👍
+つまり「条件（docMode, constrType, …, docStatus）」をキーにするのではなく、DecisionField をキーにして、そのフィールドがどの条件で editable / visible になるかを列挙するイメージですね。
+
+できますよ。形式としては、例えば Map<DecisionField, Rule[]> にして、それぞれの DecisionField ごとにルールを列挙する方式です。
+
+import { DecisionField, DocMode } from '~/composables/tmp'
+
+type Context = {
+  docMode: DocMode
+  constrType: string
+  submissionType: string
+  freeInput: boolean
+  docStatus: string
+}
+
+type Rule = {
+  when: Partial<Context> // 条件
+  editable: boolean
+  visible: boolean
+}
+
+const fieldRules = new Map<DecisionField, Rule[]>([
+  [
+    DecisionField.DocName,
+    [
+      {
+        when: { docMode: DocMode.Create, docStatus: "draft" },
+        editable: true,
+        visible: true,
+      },
+      {
+        when: { docMode: DocMode.View },
+        editable: false,
+        visible: true,
+      },
+    ],
+  ],
+  [
+    DecisionField.DocType,
+    [
+      {
+        when: { docMode: DocMode.Edit, constrType: "A" },
+        editable: false,
+        visible: true,
+      },
+    ],
+  ],
+  [
+    DecisionField.CreatedAt,
+    [
+      {
+        when: { docMode: DocMode.Create },
+        editable: false,
+        visible: false,
+      },
+      {
+        when: { docMode: DocMode.View },
+        editable: false,
+        visible: true,
+      },
+    ],
+  ],
+])
+次に「今のコンテキストにおける状態」を取り出すユーティリティを作ります。
+
+function getFieldState(
+  field: DecisionField,
+  ctx: Context
+): { editable: boolean; visible: boolean } {
+  const rules = fieldRules.get(field) ?? []
+  for (const rule of rules) {
+    const matched = Object.entries(rule.when).every(
+      ([k, v]) => (ctx as any)[k] === v
+    )
+    if (matched) {
+      return { editable: rule.editable, visible: rule.visible }
+    }
+  }
+  // マッチしない場合のデフォルト
+  return { editable: false, visible: false }
+}
+利用例:
+
+const ctx: Context = {
+  docMode: DocMode.Create,
+  constrType: "A",
+  submissionType: "draft",
+  freeInput: true,
+  docStatus: "draft",
+}
+
+const state = getFieldState(DecisionField.DocName, ctx)
+// -> { editable: true, visible: true }
+この方式なら
+
+キーが DecisionField 固定
+
+各フィールドごとに複数のルールを列挙できる
+
+条件は when で部分的に指定すればよい
+
+という感じで、「Excelのマトリクスを行ごとに変換したデータ」をそのまま貼れるイメージになります。
+
+👉 ご質問：
+このルール定義を「TypeScriptのコードにベタ書き」する想定ですか？
+それとも「JSONにまとめて外部から読み込みたい」イメージですか？
+
+あなた:
+キーが DecisionField 固定、と、キーが色々な状態、とどっちがいいと思いますか
+ChatGPT:
+良い質問ですね 👌
+実務で「どっちの形でルールを持つか」は、管理のしやすさ と 取り出すときの使いやすさ のトレードオフになります。
+
+1. キーが DecisionField 固定
+Map<DecisionField, Rule[]>
+メリット
+フィールドごとにルールがまとまるので見通しがいい
+→ Excelの「列（フィールド）」ごとに条件をまとめた形に近い
+
+ルールを探すときに「DocNameのルールはここ！」とすぐ見つけられる
+
+「このフィールドだけ抜き出して表示制御したい」場合に便利
+
+デメリット
+「全体の特定条件での振る舞い」を横断的に探しにくい
+例: docMode = View のときに 全部のフィールド がどうなるかを確認するのが少し大変
+
+2. キーが「条件（状態セット）」固定
+Map<ContextKey, { [field in DecisionField]: { editable: boolean; visible: boolean } }>
+メリット
+「この状態（docMode=View, constrType=A, …）のときに全部どうなるか」が一発で分かる
+
+Excelの「行（条件セット）」をそのままデータに落とし込める
+
+実行時は lookup が O(1)（Mapのキー一致だけ）
+
+デメリット
+フィールドごとのルールを追加・修正するときに分かりづらい
+
+1つのフィールドの動作だけ確認したいときに探しにくい
+
+実務的なおすすめ
+Excelを「行＝条件セット」「列＝フィールド」にしているなら → ② 条件キー方式 が自然
+
+開発者が「フィールド単位で仕様を追いたい」ことが多いなら → ① フィールドキー方式 が管理しやすい
+
+💡 よくある妥協策：
+
+内部データは「条件キー方式」（Excelの表をそのままインポートしやすい）
+
+ユーティリティで「フィールド単位ビュー」を作れるようにする
+
+こうすると、Excelのルールを変換して突っ込むのも楽だし、コード上で「このフィールドのルールだけ見たい」ときも対応できます。
+
+👉 質問：
+今のルール管理は「Excelでマトリクスを作って、それをベースにコードへ反映」する運用ですか？
+それとも「最初はExcelで整理するけど、最終的にはコードで完結させる」イメージですか？
+
+あなた:
+「最初はExcelで整理するけど、最終的にはコードで完結させる、 です
+ChatGPT:
+なるほど！了解です 👍
+
+その場合、実務上おすすめの方法はこうなります：
+
+💡 おすすめ設計
+Excelは条件セット（行）ベースで整理
+
+1行 = 1条件セット（docMode, constrType, submissionType, freeInput, docStatus）
+
+各列 = DecisionField
+
+セル = { visible, editable }
+
+Excel → JSON/TS に変換
+
+Mapやオブジェクトで保持
+
+形式例（条件セットキー方式）：
+
+type FieldRules = Record<DecisionField, { visible: boolean; editable: boolean }>
+
+type RuleEntry = {
+  ctx: {
+    docMode: DocMode
+    constrType: string
+    submissionType: string
+    freeInput: boolean
+    docStatus: string
+  }
+  rules: FieldRules
+}
+
+// Excelから変換したJSON
+const ruleMatrix: RuleEntry[] = [
+  {
+    ctx: { docMode: DocMode.Create, constrType: "A", submissionType: "draft", freeInput: true, docStatus: "draft" },
+    rules: {
+      [DecisionField.DocType]: { visible: true, editable: true },
+      [DecisionField.DocName]: { visible: true, editable: true },
+      [DecisionField.DocSubject]: { visible: true, editable: true },
+      [DecisionField.CreatedAt]: { visible: true, editable: false },
+      [DecisionField.PrimaryFlg]: { visible: true, editable: false },
+    }
+  },
+  // Excelの行ごとに追加…
+]
+コード上でlookup関数を用意
+
+function getRulesForContext(ctx: RuleEntry['ctx']): FieldRules | undefined {
+  return ruleMatrix.find(entry =>
+    Object.entries(ctx).every(([k, v]) => (entry.ctx as any)[k] === v)
+  )?.rules
+}
+✅ メリット
+Excelで整理 → JSONに変換 → コードで完結 というフローが自然
+
+ルールの追加・修正はExcelで管理できる
+
+TypeScriptで型チェック可能
+
+全条件セットを一発で取得できる
+
+補足
+条件セットが膨大になる場合は、Excel → JSON自動変換スクリプトを用意すると便利です
+
+JSON化しておけば、将来的にMapに変換してO(1) lookupに変更することも可能です
+
+質問です：
+💡 この方式で作る場合、Mapにするか配列のまま線形検索するかは気になりますか？
+（行数が数百行くらいなら配列でも十分です）
+
+あなた:
+ctxの値がpropsやpiniaやapiのレスポンスが混合していても大丈夫ですか
+ChatGPT:
+はい、大丈夫です 👍
+
+ポイントは 「最終的にその時点のすべての条件値が揃っていること」 です。
+
+理由
+getRulesForContext(ctx) のような関数は 単純に ctx の値とルールの条件を比較しているだけ です
+
+props・Pinia・APIレスポンスなど、値の取得元は関係ありません
+
+「比較する値がリアクティブかどうか」 も関数内では問題にならない
+
+ただし、Vue の computed や watch でリアクティブに使う場合は、ctx を reactive にしておくと自動で更新されます
+
+例
+const props = defineProps<{ docMode: DocMode, constrType: string }>()
+const piniaStore = useDocStore() // submissionTypeを保持
+const apiData = ref({ freeInput: true, docStatus: "draft" })
+
+const ctx = reactive({
+  docMode: props.docMode,
+  constrType: props.constrType,
+  submissionType: piniaStore.submissionType,
+  freeInput: apiData.value.freeInput,
+  docStatus: apiData.value.docStatus,
+})
+
+const rules = computed(() => getRulesForContext(ctx))
+ctx は props / Pinia / API などをまとめた 1つのリアクティブオブジェクト
+
+rules は computed で自動更新される
+
+条件値が変われば、自動で各フィールドの visible/editable が反映されます
+
+💡 ポイント
+
+ctx の各値はどこから来ても良い（props, store, API など）
+
+最終的に getRules 関数に渡す時点で値が揃っていること が重要
+
+APIレスポンスなど非同期データは、ref や reactive で管理しておけば自然に反映されます
+
+必要であれば、僕が props/Pinia/API混合でもリアクティブに動く完全サンプル を作ることもできます。
+
+作ってほしいですか？
+
+あなた:
+すいません、方針としてreactiveではなくrefを使いたいです
+ChatGPT:
+なるほどです 👍
+reactive ではなく ref で1つのオブジェクトを管理する方式 でも問題なく実装できます。
+
+ポイントは以下の通りです：
+
+1. ref でコンテキストを管理
+import { ref, computed } from 'vue'
+import { DocMode, DecisionField } from '~/composables/tmp'
+import { getRulesForContext } from './ruleMatrix'
+
+type Context = {
+  docMode: DocMode
+  constrType: string
+  submissionType: string
+  freeInput: boolean
+  docStatus: string
+}
+
+// refで1つのオブジェクトとして保持
+const ctx = ref<Context>({
+  docMode: DocMode.Create,
+  constrType: 'A',
+  submissionType: 'draft',
+  freeInput: true,
+  docStatus: 'draft',
+})
+2. computed でフィールドルールを取得
+const rules = computed(() => getRulesForContext(ctx.value))
+ctx.value が更新されると、自動で rules も再計算されます
+
+ref のオブジェクト内のプロパティを書き換える場合は 必ず ctx.value.xxx = ... を使うこと
+
+3. 使用例（フォームで反映）
+<v-text-field
+  v-if="rules.value?.[DecisionField.DocName]?.visible"
+  v-model="form.docName"
+  :disabled="!rules.value?.[DecisionField.DocName]?.editable"
+/>
+メリット
+ref 1つで管理できるので reactive より扱いがシンプル
+
+props / Pinia / API などから値をまとめて ctx.value.xxx = ... で更新可能
+
+computed と組み合わせればリアクティブに反映される
+
+💡 注意点
+
+ctx.value 内のプロパティを 新しいオブジェクトで置き換えない でください。
+
+// NG: これは rules が更新されない場合がある
+ctx.value = { ...ctx.value, docMode: DocMode.View } 
+→ ctx.value.docMode = DocMode.View のようにプロパティ単位で更新するのが安全です
+
+必要であれば、props / Pinia / API すべて混在でも動く ref ベースの完全サンプル を作れます。
+作りますか？
+
+あなた:
+お願いします
+ChatGPT:
+了解です 👍
+では props / Pinia / API すべて混在で、ref ベースでリアクティブに動くフォーム制御サンプル を作ります。
+
+1. 前提：型定義と DecisionField / DocMode
+// types.ts
+export enum DecisionField {
+  DocType,
+  DocName,
+  DocSubject,
+  CreatedAt,
+  PrimaryFlg,
+}
+
+export enum DocMode {
+  Create,
+  Edit,
+  EditAfterProposal,
+  View,
+}
+
+export type Context = {
+  docMode: DocMode
+  constrType: string
+  submissionType: string
+  freeInput: boolean
+  docStatus: string
+}
+
+export type FieldRules = Record<DecisionField, { visible: boolean; editable: boolean }>
+2. ルールデータ（Excelから変換したイメージ）
+// ruleMatrix.ts
+import { DecisionField, DocMode, FieldRules, Context } from './types'
+
+export type RuleEntry = {
+  ctx: Partial<Context> // 部分指定でもOK
+  rules: FieldRules
+}
+
+// 例: 条件ごとのルールを列挙
+export const ruleMatrix: RuleEntry[] = [
+  {
+    ctx: { docMode: DocMode.Create, docStatus: 'draft' },
+    rules: {
+      [DecisionField.DocType]: { visible: true, editable: true },
+      [DecisionField.DocName]: { visible: true, editable: true },
+      [DecisionField.DocSubject]: { visible: true, editable: true },
+      [DecisionField.CreatedAt]: { visible: true, editable: false },
+      [DecisionField.PrimaryFlg]: { visible: true, editable: false },
+    }
+  },
+  {
+    ctx: { docMode: DocMode.View },
+    rules: {
+      [DecisionField.DocType]: { visible: true, editable: false },
+      [DecisionField.DocName]: { visible: true, editable: false },
+      [DecisionField.DocSubject]: { visible: true, editable: false },
+      [DecisionField.CreatedAt]: { visible: true, editable: false },
+      [DecisionField.PrimaryFlg]: { visible: true, editable: false },
+    }
+  },
+]
+3. ルール取得関数
+// useRules.ts
+import { ruleMatrix } from './ruleMatrix'
+import type { Context, FieldRules, DecisionField } from './types'
+
+export function getRulesForContext(ctx: Context): FieldRules | undefined {
+  // ruleMatrix 内で ctx にマッチする最初のルールを返す
+  return ruleMatrix.find(entry =>
+    Object.entries(entry.ctx).every(([k, v]) => (ctx as any)[k] === v)
+  )?.rules
+}
+4. Vue / Nuxt コンポーネント例
+<script setup lang="ts">
+import { ref, computed, watch } from 'vue'
+import { DecisionField, DocMode, FieldRules, Context } from '~/types'
+import { getRulesForContext } from '~/ruleMatrix'
+import { useDocStore } from '~/stores/doc'
+
+// props から一部取得
+const props = defineProps<{
+  docMode: DocMode
+  constrType: string
+}>()
+
+// Pinia store から取得
+const store = useDocStore() // submissionType などを保持
+
+// APIレスポンスの例
+const apiData = ref({ freeInput: true, docStatus: 'draft' })
+
+// ctx を ref でまとめる
+const ctx = ref<Context>({
+  docMode: props.docMode,
+  constrType: props.constrType,
+  submissionType: store.submissionType,
+  freeInput: apiData.value.freeInput,
+  docStatus: apiData.value.docStatus,
+})
+
+// APIの更新があれば ctx も更新
+watch(apiData, (val) => {
+  ctx.value.freeInput = val.freeInput
+  ctx.value.docStatus = val.docStatus
+})
+
+// フィールドルールを computed で取得
+const rules = computed<FieldRules | undefined>(() => getRulesForContext(ctx.value))
+
+// フォームデータ
+const form = ref({
+  docType: '',
+  docName: '',
+  docSubject: '',
+  createdAt: '',
+  primaryFlg: false
+})
+</script>
+
+<template>
+  <v-text-field
+    v-if="rules?.[DecisionField.DocName]?.visible"
+    v-model="form.docName"
+    label="Document Name"
+    :disabled="!rules?.[DecisionField.DocName]?.editable"
+  />
+
+  <v-text-field
+    v-if="rules?.[DecisionField.DocType]?.visible"
+    v-model="form.docType"
+    label="Document Type"
+    :disabled="!rules?.[DecisionField.DocType]?.editable"
+  />
+</template>
+🔹 ポイント
+ctx は ref で1つのオブジェクトとして管理
+
+props, Pinia, API などの値をまとめて代入
+
+APIの非同期レスポンスも watch で更新可能
+
+computed でルールをリアクティブに取得
+
+ctx が変われば自動でフィールドの visible/editable が反映
+
+フォームは ref で管理
+
+v-model と組み合わせてシンプルにバインド
+
+これで props / Pinia / API 混合でも、refベースでリアクティブにフォーム表示・編集制御 が可能になります。
+
+もし希望なら、このサンプルを 「fieldRulesをMap<DecisionField, Rule[]> にして条件を部分指定で列挙する形式」 に拡張して、さらに Excel の行をそのまま貼れる形にもできます。
+
+作りますか？
+
+あなた:
+すみません、キーがDecisionFieldのバージョンでお願いします
+ChatGPT:
+了解です 👍
+では キーが DecisionField 固定で、条件を列挙して管理するバージョン のサンプルを作ります。
+この方式だと、Excelの「1列＝フィールド、複数行＝条件セット」をそのままコード化できます。
+
+1. 型定義
+// types.ts
+import { DocMode } from './modes'
+
+export enum DecisionField {
+  DocType,
+  DocName,
+  DocSubject,
+  CreatedAt,
+  PrimaryFlg,
+}
+
+export type Context = {
+  docMode: DocMode
+  constrType: string
+  submissionType: string
+  freeInput: boolean
+  docStatus: string
+}
+
+export type Rule = {
+  when: Partial<Context> // 条件を部分指定
+  editable: boolean
+  visible: boolean
+}
+
+export type FieldRulesMap = Map<DecisionField, Rule[]>
+2. フィールドごとのルール定義（Map）
+import { DecisionField, DocMode, Rule, FieldRulesMap } from './types'
+
+export const fieldRules: FieldRulesMap = new Map<DecisionField, Rule[]>([
+  [
+    DecisionField.DocName,
+    [
+      {
+        when: { docMode: DocMode.Create, docStatus: 'draft' },
+        editable: true,
+        visible: true,
+      },
+      {
+        when: { docMode: DocMode.View },
+        editable: false,
+        visible: true,
+      },
+    ],
+  ],
+  [
+    DecisionField.DocType,
+    [
+      {
+        when: { docMode: DocMode.Edit, constrType: 'A' },
+        editable: false,
+        visible: true,
+      },
+      {
+        when: { docMode: DocMode.Create },
+        editable: true,
+        visible: true,
+      },
+    ],
+  ],
+  [
+    DecisionField.CreatedAt,
+    [
+      { when: { docMode: DocMode.Create }, editable: false, visible: false },
+      { when: { docMode: DocMode.View }, editable: false, visible: true },
+    ],
+  ],
+])
+3. 条件にマッチするルールを取得するユーティリティ
+import type { Context, DecisionField, Rule } from './types'
+import { fieldRules } from './fieldRules'
+
+export function getFieldState(field: DecisionField, ctx: Context): { editable: boolean; visible: boolean } {
+  const rules: Rule[] = fieldRules.get(field) ?? []
+  
+  for (const rule of rules) {
+    const matched = Object.entries(rule.when).every(([k, v]) => (ctx as any)[k] === v)
+    if (matched) {
+      return { editable: rule.editable, visible: rule.visible }
+    }
+  }
+
+  // デフォルト: 全て非表示・編集不可
+  return { editable: false, visible: false }
+}
+4. Vue / Nuxt3 での利用例（refベース）
+<script setup lang="ts">
+import { ref, computed, watch } from 'vue'
+import { DecisionField, Context } from '~/types'
+import { getFieldState } from '~/fieldRules'
+import { useDocStore } from '~/stores/doc'
+import { DocMode } from '~/types'
+
+// props
+const props = defineProps<{ docMode: DocMode, constrType: string }>()
+
+// Pinia store
+const store = useDocStore()
+
+// APIレスポンス
+const apiData = ref({ freeInput: true, docStatus: 'draft' })
+
+// ctx を ref でまとめる
+const ctx = ref<Context>({
+  docMode: props.docMode,
+  constrType: props.constrType,
+  submissionType: store.submissionType,
+  freeInput: apiData.value.freeInput,
+  docStatus: apiData.value.docStatus,
+})
+
+// APIデータ更新時に ctx を更新
+watch(apiData, (val) => {
+  ctx.value.freeInput = val.freeInput
+  ctx.value.docStatus = val.docStatus
+})
+
+// フォームデータ
+const form = ref({
+  docType: '',
+  docName: '',
+  docSubject: '',
+  createdAt: '',
+  primaryFlg: false,
+})
+
+// computed でフィールドごとの状態を取得
+const docNameState = computed(() => getFieldState(DecisionField.DocName, ctx.value))
+const docTypeState = computed(() => getFieldState(DecisionField.DocType, ctx.value))
+</script>
+
+<template>
+  <v-text-field
+    v-if="docNameState.visible"
+    v-model="form.docName"
+    label="Document Name"
+    :disabled="!docNameState.editable"
+  />
+
+  <v-text-field
+    v-if="docTypeState.visible"
+    v-model="form.docType"
+    label="Document Type"
+    :disabled="!docTypeState.editable"
+  />
+</template>
+✅ ポイント
+キーが DecisionField 固定
+
+Excel の「列＝フィールド」に対応
+
+1フィールドごとに複数条件のルールを列挙可能
+
+条件は部分指定（Partial<Context>）
+
+その条件にマッチした最初のルールを採用
+
+デフォルトで非表示・非編集にして安全
+
+ref + computed でリアクティブに管理
+
+props / Pinia / API など混在でも自動反映
+
+この方式なら、Excelの列ごとのルールをそのまま貼り付けて管理できる形になります。
+
+もし希望であれば、僕がこのサンプルを 「全フィールドまとめて computed で一括取得できる形」 に拡張して、テンプレートも v-for で回せるようにできます。
+
+作りますか？
+
+
+
+
+選択されていません選択されていません
+ChatGPT の回答は必ずしも正しいとは限りません。重要な情報は確認するようにしてください。
